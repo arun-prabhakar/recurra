@@ -32,8 +32,10 @@ public class RecurraProperties {
         private boolean enabled = true;
         private int maxSize = 10000;
         private Duration expireAfterWrite = Duration.ofHours(24);
-        private double similarityThreshold = 0.85;
+        private double similarityThreshold = 0.87;
         private boolean templateMatching = true;
+        private int hammingThreshold = 6;           // SimHash Hamming distance
+        private double cosineThreshold = 0.15;      // Embedding cosine distance
     }
 
     @Data

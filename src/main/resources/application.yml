@@ -73,9 +73,14 @@ recurra:
     expire-after-write: 24h
     # Template matching threshold (0.0 - 1.0)
     # Higher value = stricter matching, lower = more fuzzy
-    similarity-threshold: 0.85
+    # Using strict threshold (0.87) for high precision
+    similarity-threshold: 0.87
     # Enable structural matching beyond exact matches
     template-matching: true
+    # SimHash Hamming distance threshold (0-64, lower = stricter)
+    hamming-threshold: 6
+    # Cosine distance threshold for embeddings (0.0-2.0, lower = stricter)
+    cosine-threshold: 0.15
 
   # Request forwarding
   proxy:
