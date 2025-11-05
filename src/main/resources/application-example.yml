@@ -1,0 +1,31 @@
+# Example configuration for Recurra
+# Copy this file to application.yml and fill in your API keys
+
+server:
+  port: 8080
+
+recurra:
+  providers:
+    openai:
+      enabled: true
+      base-url: https://api.openai.com/v1
+      api-key: sk-your-openai-api-key-here
+
+    anthropic:
+      enabled: false
+      base-url: https://api.anthropic.com/v1
+      api-key: sk-ant-your-anthropic-api-key-here
+
+  cache:
+    enabled: true
+    max-size: 10000
+    expire-after-write: 24h
+    # Similarity threshold for template matching (0.0 - 1.0)
+    # 0.85 means requests must be 85% similar to match
+    similarity-threshold: 0.85
+    # Enable template-aware matching
+    template-matching: true
+
+  proxy:
+    timeout: 60s
+    max-retries: 3

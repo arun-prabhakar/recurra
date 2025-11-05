@@ -1,0 +1,39 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: recurra
+
+recurra:
+  # Provider configurations
+  providers:
+    openai:
+      enabled: true
+      base-url: https://api.openai.com/v1
+      api-key: ${OPENAI_API_KEY:}
+    anthropic:
+      enabled: false
+      base-url: https://api.anthropic.com/v1
+      api-key: ${ANTHROPIC_API_KEY:}
+
+  # Cache configuration
+  cache:
+    enabled: true
+    max-size: 10000
+    expire-after-write: 24h
+    # Template matching threshold (0.0 - 1.0)
+    # Higher value = stricter matching, lower = more fuzzy
+    similarity-threshold: 0.85
+    # Enable structural matching beyond exact matches
+    template-matching: true
+
+  # Request forwarding
+  proxy:
+    timeout: 60s
+    max-retries: 3
+
+logging:
+  level:
+    com.recurra: DEBUG
+    org.springframework.web: INFO
