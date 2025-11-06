@@ -1,0 +1,175 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recurra
+  namespace: recurra
+  labels:
+    app: recurra
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: recurra
+  template:
+    metadata:
+      labels:
+        app: recurra
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      initContainers:
+        # Wait for PostgreSQL to be ready
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z postgres 5432; do
+                echo "Waiting for PostgreSQL..."
+                sleep 2
+              done
+              echo "PostgreSQL is ready"
+
+        # Wait for Redis to be ready
+        - name: wait-for-redis
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z redis 6379; do
+                echo "Waiting for Redis..."
+                sleep 2
+              done
+              echo "Redis is ready"
+
+      containers:
+        - name: recurra
+          image: recurra-proxy:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          env:
+            # Database configuration
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: recurra-secrets
+                  key: postgres-password
+
+            # Provider API keys
+            - name: RECURRA_PROVIDERS_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: recurra-secrets
+                  key: openai-api-key
+
+            - name: RECURRA_PROVIDERS_ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: recurra-secrets
+                  key: anthropic-api-key
+
+            - name: RECURRA_PROVIDERS_BEDROCK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: recurra-secrets
+                  key: bedrock-credentials
+
+            - name: RECURRA_PROVIDERS_BEDROCK_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: recurra-secrets
+                  key: bedrock-region
+
+            # JVM options
+            - name: JAVA_OPTS
+              value: "-Xms1g -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+HeapDumpOnOutOfMemoryError"
+
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1000m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 30
+
+      volumes:
+        - name: config
+          configMap:
+            name: recurra-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: recurra
+  namespace: recurra
+  labels:
+    app: recurra
+spec:
+  type: ClusterIP
+  selector:
+    app: recurra
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  sessionAffinity: None
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: recurra-headless
+  namespace: recurra
+  labels:
+    app: recurra
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: recurra
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
