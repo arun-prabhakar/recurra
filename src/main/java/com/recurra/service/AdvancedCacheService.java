@@ -10,6 +10,8 @@ import com.recurra.repository.CacheEntryRepository;
 import com.recurra.repository.RedisExactCacheRepository;
 import com.recurra.service.canonicalization.PromptMasker;
 import com.recurra.service.canonicalization.RequestCanonicalizer;
+import com.recurra.service.compatibility.ModeDetector;
+import com.recurra.service.compatibility.ToolSchemaHasher;
 import com.recurra.service.embedding.EmbeddingService;
 import com.recurra.service.similarity.CompositeScorer;
 import com.recurra.service.similarity.SimHashGenerator;
@@ -42,6 +44,8 @@ public class AdvancedCacheService {
     private final PromptMasker promptMasker;
     private final SimHashGenerator simHashGenerator;
     private final CompositeScorer compositeScorer;
+    private final ModeDetector modeDetector;
+    private final ToolSchemaHasher toolSchemaHasher;
     private final RecurraProperties properties;
     private final ObjectMapper objectMapper;
 
@@ -57,6 +61,8 @@ public class AdvancedCacheService {
             PromptMasker promptMasker,
             SimHashGenerator simHashGenerator,
             CompositeScorer compositeScorer,
+            ModeDetector modeDetector,
+            ToolSchemaHasher toolSchemaHasher,
             RecurraProperties properties,
             ObjectMapper objectMapper) {
         this.redisCache = redisCache;
@@ -65,6 +71,8 @@ public class AdvancedCacheService {
         this.promptMasker = promptMasker;
         this.simHashGenerator = simHashGenerator;
         this.compositeScorer = compositeScorer;
+        this.modeDetector = modeDetector;
+        this.toolSchemaHasher = toolSchemaHasher;
         this.properties = properties;
         this.objectMapper = objectMapper;
     }
@@ -176,8 +184,9 @@ public class AdvancedCacheService {
             // Get request metadata
             String model = request.getModel();
             String mode = detectMode(request);
+            String toolSchemaHash = computeToolSchemaHash(request);
 
-            // Query Postgres for SimHash candidates
+            // Query Postgres for SimHash candidates (filtered by mode)
             List<CacheEntryEntity> candidates = postgresRepo.findSimHashCandidates(
                     DEFAULT_TENANT,
                     mode,
@@ -192,7 +201,21 @@ public class AdvancedCacheService {
                 return Optional.empty();
             }
 
-            log.debug("Found {} SimHash candidates, scoring...", candidates.size());
+            log.debug("Found {} SimHash candidates, filtering by tool schema...", candidates.size());
+
+            // Filter by tool schema hash (guardrail against wrong tool usage)
+            List<CacheEntryEntity> filteredCandidates = candidates.stream()
+                    .filter(candidate -> toolSchemaHasher.areCompatible(toolSchemaHash, candidate.getToolSchemaHash()))
+                    .toList();
+
+            if (filteredCandidates.isEmpty()) {
+                log.debug("No candidates after tool schema filtering (request hash: {}, had {} candidates)",
+                        toolSchemaHash != null ? toolSchemaHash.substring(0, 8) + "..." : "null",
+                        candidates.size());
+                return Optional.empty();
+            }
+
+            log.debug("Found {} candidates after tool schema filtering, scoring...", filteredCandidates.size());
 
             // Generate embedding for semantic similarity
             // IMPORTANT: Use RAW text, not masked text, to capture semantic differences
@@ -210,10 +233,10 @@ public class AdvancedCacheService {
                 log.debug("Embedding service not available, using structural matching only");
             }
 
-            // Score candidates
+            // Score filtered candidates
             CompositeScorer.ScoredCandidate bestMatch = compositeScorer.findBestMatch(
                     request,
-                    candidates,
+                    filteredCandidates,
                     simhash,
                     requestEmbedding,
                     properties.getCache().getSimilarityThreshold()
@@ -320,7 +343,7 @@ public class AdvancedCacheService {
                     .model(request.getModel())
                     .temperatureBucket(getTemperatureBucket(request.getTemperature()))
                     .mode(detectMode(request))
-                    .toolSchemaHash(null)  // TODO: Compute in Phase 3
+                    .toolSchemaHash(computeToolSchemaHash(request))
                     .hitCount(0)
                     .isGolden(false)
                     .piiPresent(promptMasker.containsPii(extractPromptText(request)))
@@ -364,17 +387,28 @@ public class AdvancedCacheService {
     }
 
     /**
-     * Detect request mode (text, json, tools, etc.).
+     * Detect request mode and return as string.
      */
     private String detectMode(ChatCompletionRequest request) {
+        return modeDetector.modeToString(modeDetector.detect(request));
+    }
+
+    /**
+     * Compute tool schema hash for the request.
+     * Returns null if no tools/functions present.
+     */
+    private String computeToolSchemaHash(ChatCompletionRequest request) {
+        // Check for tools (function calling v2)
         if (request.getTools() != null && !request.getTools().isEmpty()) {
-            return "tools";
+            return toolSchemaHasher.hashTools(request.getTools());
         }
+
+        // Check for functions (legacy)
         if (request.getFunctions() != null && !request.getFunctions().isEmpty()) {
-            return "function";
+            return toolSchemaHasher.hashFunctions(request.getFunctions());
         }
-        // TODO: Check response_format for json_object/json_schema
-        return "text";
+
+        return null;
     }
 
     /**
