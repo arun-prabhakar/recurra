@@ -195,11 +195,14 @@ public class AdvancedCacheService {
             log.debug("Found {} SimHash candidates, scoring...", candidates.size());
 
             // Generate embedding for semantic similarity
+            // IMPORTANT: Use RAW text, not masked text, to capture semantic differences
+            // Example: "Summarize https://example.com/article-123" vs "...article-456"
+            // Masked would be identical, but raw embeddings will differ
             float[] requestEmbedding = null;
             if (embeddingService != null && embeddingService.isReady()) {
                 try {
-                    requestEmbedding = embeddingService.embed(maskedPrompt.getMasked());
-                    log.debug("Generated embedding ({}d) for request", requestEmbedding.length);
+                    requestEmbedding = embeddingService.embed(promptText);
+                    log.debug("Generated embedding ({}d) from raw prompt for semantic matching", requestEmbedding.length);
                 } catch (Exception e) {
                     log.warn("Failed to generate embedding, falling back to structural matching only", e);
                 }
@@ -289,12 +292,15 @@ public class AdvancedCacheService {
                 return;
             }
 
-            // Generate embedding for the masked prompt
+            // Generate embedding for semantic similarity matching
+            // IMPORTANT: Use RAW text for embeddings to preserve semantic differences
+            // Masked text loses information (e.g., different URLs become identical {URL})
             float[] embedding = null;
             if (embeddingService != null && embeddingService.isReady()) {
                 try {
-                    embedding = embeddingService.embed(maskedPrompt.getMasked());
-                    log.debug("Generated embedding ({}d) for storage", embedding.length);
+                    String rawPromptText = extractPromptText(request);
+                    embedding = embeddingService.embed(rawPromptText);
+                    log.debug("Generated embedding ({}d) from raw prompt for storage", embedding.length);
                 } catch (Exception e) {
                     log.warn("Failed to generate embedding for storage, will store without semantic vector", e);
                 }

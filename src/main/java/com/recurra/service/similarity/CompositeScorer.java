@@ -18,13 +18,16 @@ import java.util.stream.Collectors;
  * Composite scoring for template-aware cache matching.
  *
  * Combines multiple signals:
- * - Structural similarity (SimHash Hamming distance)
- * - Semantic similarity (embedding cosine distance)
+ * - Semantic similarity (embedding cosine distance) - PRIMARY
+ * - Structural similarity (SimHash Hamming distance) - SECONDARY
  * - Parameter similarity (temperature, top_p closeness)
  * - Recency (time decay)
  *
- * Formula:
- * score = 0.4 * structural + 0.4 * semantic + 0.1 * param + 0.1 * recency
+ * Formula (prioritizing semantic over structural):
+ * score = 0.6 * semantic + 0.2 * structural + 0.1 * param + 0.1 * recency
+ *
+ * This ensures different content (e.g., different URLs) won't match even if
+ * structurally identical, since embeddings capture semantic differences.
  *
  * Threshold (configurable): 0.87 for strict matching
  */
@@ -34,11 +37,11 @@ public class CompositeScorer {
 
     private final SimHashGenerator simHashGenerator;
 
-    // Scoring weights
-    private static final double WEIGHT_STRUCTURAL = 0.4;
-    private static final double WEIGHT_SEMANTIC = 0.4;
-    private static final double WEIGHT_PARAM = 0.1;
-    private static final double WEIGHT_RECENCY = 0.1;
+    // Scoring weights (semantic-first approach)
+    private static final double WEIGHT_SEMANTIC = 0.6;   // Primary signal
+    private static final double WEIGHT_STRUCTURAL = 0.2; // Secondary for template structure
+    private static final double WEIGHT_PARAM = 0.1;      // Parameter closeness
+    private static final double WEIGHT_RECENCY = 0.1;    // Time decay
 
     // Recency decay (half-life in hours)
     private static final double RECENCY_HALF_LIFE_HOURS = 168.0; // 1 week
@@ -75,9 +78,9 @@ public class CompositeScorer {
             // 4. Recency score
             double recencyScore = calculateRecencyScore(candidate.getCreatedAt());
 
-            // 5. Composite score
-            double composite = WEIGHT_STRUCTURAL * structuralScore
-                    + WEIGHT_SEMANTIC * semanticScore
+            // 5. Composite score (semantic-first)
+            double composite = WEIGHT_SEMANTIC * semanticScore
+                    + WEIGHT_STRUCTURAL * structuralScore
                     + WEIGHT_PARAM * paramScore
                     + WEIGHT_RECENCY * recencyScore;
 
