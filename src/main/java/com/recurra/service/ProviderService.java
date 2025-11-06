@@ -1,96 +1,80 @@
 package com.recurra.service;
 
-import com.recurra.config.RecurraProperties;
 import com.recurra.model.ChatCompletionRequest;
 import com.recurra.model.ChatCompletionResponse;
+import com.recurra.provider.ChatProvider;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
-import reactor.util.retry.Retry;
 
-import java.time.Duration;
+import java.util.List;
 
 /**
- * Service for forwarding requests to AI providers.
+ * Service for forwarding requests to AI providers using the provider adapter pattern.
+ * Automatically routes requests to the appropriate provider based on model name.
  */
 @Slf4j
 @Service
 public class ProviderService {
 
-    private final WebClient webClient;
-    private final RecurraProperties properties;
+    private final List<ChatProvider> providers;
 
-    public ProviderService(WebClient webClient, RecurraProperties properties) {
-        this.webClient = webClient;
-        this.properties = properties;
+    public ProviderService(List<ChatProvider> providers) {
+        this.providers = providers;
+        log.info("Initialized ProviderService with {} providers: {}",
+                providers.size(),
+                providers.stream().map(ChatProvider::getName).toList());
     }
 
     /**
-     * Forward request to the appropriate provider.
+     * Forward request to the appropriate provider based on model name.
+     * Uses the first provider that supports the model and is enabled.
      */
     public Mono<ChatCompletionResponse> forward(ChatCompletionRequest request) {
-        // Determine provider from model name
-        String provider = determineProvider(request.getModel());
+        String model = request.getModel();
 
-        RecurraProperties.ProviderConfig config = properties.getProviders().get(provider);
-        if (config == null || !config.isEnabled()) {
-            return Mono.error(new RuntimeException("Provider not configured or disabled: " + provider));
+        // Find the first provider that supports this model
+        ChatProvider provider = providers.stream()
+                .filter(ChatProvider::isEnabled)
+                .filter(p -> p.supports(model))
+                .findFirst()
+                .orElse(null);
+
+        if (provider == null) {
+            log.error("No enabled provider found for model: {}", model);
+            return Mono.error(new RuntimeException(
+                    "No provider available for model: " + model +
+                    ". Enabled providers: " +
+                    providers.stream()
+                            .filter(ChatProvider::isEnabled)
+                            .map(ChatProvider::getName)
+                            .toList()
+            ));
         }
 
-        log.info("Forwarding request to provider: {} (model: {})", provider, request.getModel());
+        log.info("Routing model '{}' to provider '{}'", model, provider.getName());
 
-        return webClient.post()
-                .uri(config.getBaseUrl() + "/chat/completions")
-                .header(HttpHeaders.AUTHORIZATION, "Bearer " + config.getApiKey())
-                .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
-                .bodyValue(request)
-                .retrieve()
-                .bodyToMono(ChatCompletionResponse.class)
-                .retryWhen(Retry.backoff(properties.getProxy().getMaxRetries(), Duration.ofSeconds(1))
-                        .maxBackoff(Duration.ofSeconds(10))
-                        .filter(throwable -> isRetryable(throwable)))
-                .doOnSuccess(response -> log.info("Received response from provider: {}", provider))
-                .doOnError(error -> log.error("Error forwarding to provider: {}", provider, error));
+        return provider.complete(request)
+                .doOnSuccess(response -> log.info("Successfully received response from provider: {}",
+                        provider.getName()))
+                .doOnError(error -> log.error("Error from provider {}: {}",
+                        provider.getName(), error.getMessage()));
     }
 
     /**
-     * Determine which provider to use based on the model name.
+     * Get list of available providers.
      */
-    private String determineProvider(String model) {
-        if (model == null) {
-            return "openai"; // Default
-        }
-
-        model = model.toLowerCase();
-
-        if (model.startsWith("gpt-") || model.startsWith("text-") || model.startsWith("davinci")) {
-            return "openai";
-        } else if (model.startsWith("claude")) {
-            return "anthropic";
-        }
-
-        // Default to OpenAI
-        return "openai";
+    public List<ChatProvider> getProviders() {
+        return providers;
     }
 
     /**
-     * Check if an error is retryable.
+     * Get a specific provider by name.
      */
-    private boolean isRetryable(Throwable throwable) {
-        // Retry on network errors and 5xx server errors
-        String message = throwable.getMessage();
-        if (message == null) {
-            return false;
-        }
-
-        return message.contains("timeout") ||
-                message.contains("connection") ||
-                message.contains("500") ||
-                message.contains("502") ||
-                message.contains("503") ||
-                message.contains("504");
+    public ChatProvider getProvider(String name) {
+        return providers.stream()
+                .filter(p -> p.getName().equals(name))
+                .findFirst()
+                .orElse(null);
     }
 }

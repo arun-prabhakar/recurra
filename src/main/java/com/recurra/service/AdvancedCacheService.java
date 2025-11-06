@@ -10,9 +10,11 @@ import com.recurra.repository.CacheEntryRepository;
 import com.recurra.repository.RedisExactCacheRepository;
 import com.recurra.service.canonicalization.PromptMasker;
 import com.recurra.service.canonicalization.RequestCanonicalizer;
+import com.recurra.service.embedding.EmbeddingService;
 import com.recurra.service.similarity.CompositeScorer;
 import com.recurra.service.similarity.SimHashGenerator;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,7 +29,7 @@ import java.util.Optional;
  * Flow:
  * 1. Check Redis for exact match (< 30ms)
  * 2. If miss, check Postgres for template match (< 100ms)
- * 3. Use composite scoring to rank candidates
+ * 3. Use composite scoring to rank candidates with embeddings
  * 4. Return best match above threshold
  */
 @Slf4j
@@ -42,6 +44,9 @@ public class AdvancedCacheService {
     private final CompositeScorer compositeScorer;
     private final RecurraProperties properties;
     private final ObjectMapper objectMapper;
+
+    @Autowired(required = false)
+    private EmbeddingService embeddingService;
 
     private static final String DEFAULT_TENANT = "default";
 
@@ -189,9 +194,18 @@ public class AdvancedCacheService {
 
             log.debug("Found {} SimHash candidates, scoring...", candidates.size());
 
-            // TODO: Generate embeddings (Phase 3)
-            // For now, use null embeddings (semantic score will be 0)
+            // Generate embedding for semantic similarity
             float[] requestEmbedding = null;
+            if (embeddingService != null && embeddingService.isReady()) {
+                try {
+                    requestEmbedding = embeddingService.embed(maskedPrompt.getMasked());
+                    log.debug("Generated embedding ({}d) for request", requestEmbedding.length);
+                } catch (Exception e) {
+                    log.warn("Failed to generate embedding, falling back to structural matching only", e);
+                }
+            } else {
+                log.debug("Embedding service not available, using structural matching only");
+            }
 
             // Score candidates
             CompositeScorer.ScoredCandidate bestMatch = compositeScorer.findBestMatch(
@@ -275,11 +289,24 @@ public class AdvancedCacheService {
                 return;
             }
 
+            // Generate embedding for the masked prompt
+            float[] embedding = null;
+            if (embeddingService != null && embeddingService.isReady()) {
+                try {
+                    embedding = embeddingService.embed(maskedPrompt.getMasked());
+                    log.debug("Generated embedding ({}d) for storage", embedding.length);
+                } catch (Exception e) {
+                    log.warn("Failed to generate embedding for storage, will store without semantic vector", e);
+                }
+            } else {
+                log.debug("Embedding service not available, storing without semantic vector");
+            }
+
             CacheEntryEntity entity = CacheEntryEntity.builder()
                     .tenantId(DEFAULT_TENANT)
                     .exactKey(exactKey)
                     .simhash(simhash)
-                    .embedding(null)  // TODO: Generate in Phase 3
+                    .embedding(embedding)
                     .canonicalPrompt(maskedPrompt.getMasked())
                     .rawPromptHmac(maskedPrompt.getRawHmac())
                     .requestJson(objectMapper.valueToTree(request))

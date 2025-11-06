@@ -87,6 +87,13 @@ recurra:
     timeout: 60s
     max-retries: 3
 
+  # Embeddings configuration
+  embeddings:
+    provider: local  # local (ONNX) or remote (OpenAI)
+    model-path: src/main/resources/models/e5-small-v2.onnx
+    dimensions: 384
+    batch-size: 32
+
 logging:
   level:
     com.recurra: DEBUG
