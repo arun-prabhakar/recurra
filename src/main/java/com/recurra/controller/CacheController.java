@@ -1,7 +1,7 @@
 package com.recurra.controller;
 
+import com.recurra.service.AdvancedCacheService;
 import com.recurra.service.ProxyService;
-import com.recurra.service.TemplateCacheService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -10,6 +10,7 @@ import java.util.Map;
 
 /**
  * Cache management controller.
+ * Provides statistics and management for Redis + Postgres cache layers.
  */
 @Slf4j
 @RestController
@@ -27,17 +28,19 @@ public class CacheController {
      */
     @GetMapping("/stats")
     public ResponseEntity<Map<String, Object>> getStats() {
-        TemplateCacheService.CacheStats stats = proxyService.getCacheStats();
+        AdvancedCacheService.CacheStats stats = proxyService.getCacheStats();
 
         return ResponseEntity.ok(Map.of(
-                "exact_entries", stats.exactEntries(),
-                "template_keys", stats.templateKeys(),
+                "exact_entries", stats.getExactEntries(),
+                "template_entries", stats.getTemplateEntries(),
+                "active_entries", stats.getActiveEntries(),
+                "total_hits", stats.getTotalHits(),
                 "status", "healthy"
         ));
     }
 
     /**
-     * Clear the cache.
+     * Clear the cache (Redis + Postgres).
      */
     @PostMapping("/clear")
     public ResponseEntity<Map<String, String>> clearCache() {
@@ -46,7 +49,7 @@ public class CacheController {
 
         return ResponseEntity.ok(Map.of(
                 "status", "success",
-                "message", "Cache cleared"
+                "message", "Cache cleared (Redis + Postgres)"
         ));
     }
 }
