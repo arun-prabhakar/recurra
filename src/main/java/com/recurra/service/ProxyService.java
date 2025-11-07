@@ -1,11 +1,13 @@
 package com.recurra.service;
 
+import com.recurra.model.CacheControlContext;
 import com.recurra.model.ChatCompletionRequest;
 import com.recurra.model.ChatCompletionResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
+import java.time.Instant;
 import java.util.Optional;
 
 /**
@@ -25,19 +27,33 @@ public class ProxyService {
     }
 
     /**
-     * Process a chat completion request.
-     * First checks cache (exact + template), then forwards to provider if needed.
+     * Process a chat completion request with default cache control context.
      */
     public Mono<ProxyResponse> processRequest(ChatCompletionRequest request) {
-        log.debug("Processing request for model: {}", request.getModel());
+        return processRequest(request, CacheControlContext.defaults());
+    }
+
+    /**
+     * Process a chat completion request with cache control context.
+     * First checks cache (exact + template), then forwards to provider if needed.
+     */
+    public Mono<ProxyResponse> processRequest(ChatCompletionRequest request, CacheControlContext context) {
+        log.debug("Processing request for model: {} with cache context: bypass={}, store={}, mode={}",
+                request.getModel(), context.isBypass(), context.isStore(), context.getMode());
 
         // Check cache first (exact + template matching)
-        Optional<AdvancedCacheService.CacheResult> cacheResult = advancedCacheService.get(request);
+        Optional<AdvancedCacheService.CacheResult> cacheResult = advancedCacheService.get(request, context);
 
         if (cacheResult.isPresent()) {
             AdvancedCacheService.CacheResult result = cacheResult.get();
             log.info("Serving {} cached response (score={}, latency={}ms)",
                     result.getMatchType(), result.getScore(), result.getLatencyMs());
+
+            // Calculate cache age
+            Long cacheAgeSeconds = null;
+            if (result.getCreatedAt() != null) {
+                cacheAgeSeconds = Instant.now().getEpochSecond() - result.getCreatedAt().getEpochSecond();
+            }
 
             return Mono.just(ProxyResponse.builder()
                     .response(markAsCached(result.getResponse()))
@@ -46,6 +62,8 @@ public class ProxyService {
                     .score(result.getScore())
                     .provenanceId(result.getProvenanceId())
                     .sourceModel(result.getSourceModel())
+                    .cacheAgeSeconds(cacheAgeSeconds)
+                    .degraded(false)
                     .build());
         }
 
@@ -54,7 +72,7 @@ public class ProxyService {
         return providerService.forward(request)
                 .map(response -> {
                     // Cache the response (async)
-                    advancedCacheService.put(request, response);
+                    advancedCacheService.put(request, response, context);
                     log.info("Response cached successfully");
 
                     return ProxyResponse.builder()
@@ -110,5 +128,8 @@ public class ProxyService {
         private double score;
         private String provenanceId;
         private String sourceModel;
+        private Long cacheAgeSeconds;  // Age of cached entry in seconds
+        private boolean degraded;  // Whether response is degraded (model family mismatch, etc.)
+        private String degradedReason;  // Reason for degradation if applicable
     }
 }

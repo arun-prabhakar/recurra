@@ -1,7 +1,9 @@
 package com.recurra.controller;
 
+import com.recurra.model.CacheControlContext;
 import com.recurra.model.ChatCompletionRequest;
 import com.recurra.model.ChatCompletionResponse;
+import com.recurra.service.CacheControlParser;
 import com.recurra.service.ProxyService;
 import com.recurra.service.StreamingService;
 import lombok.extern.slf4j.Slf4j;
@@ -24,10 +26,14 @@ public class ChatController {
 
     private final ProxyService proxyService;
     private final StreamingService streamingService;
+    private final CacheControlParser cacheControlParser;
 
-    public ChatController(ProxyService proxyService, StreamingService streamingService) {
+    public ChatController(ProxyService proxyService,
+                         StreamingService streamingService,
+                         CacheControlParser cacheControlParser) {
         this.proxyService = proxyService;
         this.streamingService = streamingService;
+        this.cacheControlParser = cacheControlParser;
     }
 
     /**
@@ -36,10 +42,17 @@ public class ChatController {
      */
     @PostMapping(value = "/chat/completions",
                  consumes = MediaType.APPLICATION_JSON_VALUE)
-    public Mono<?> createChatCompletion(@RequestBody ChatCompletionRequest request) {
+    public Mono<?> createChatCompletion(
+            @RequestBody ChatCompletionRequest request,
+            @RequestHeader HttpHeaders headers) {
 
         log.info("Received chat completion request for model: {}, stream: {}",
                 request.getModel(), request.getStream());
+
+        // Parse cache control headers
+        CacheControlContext cacheContext = cacheControlParser.parse(headers);
+        log.debug("Parsed cache control context: bypass={}, store={}, mode={}",
+                cacheContext.isBypass(), cacheContext.isStore(), cacheContext.getMode());
 
         // Validate request
         if (request.getMessages() == null || request.getMessages().isEmpty()) {
@@ -54,17 +67,19 @@ public class ChatController {
         boolean isStreaming = request.getStream() != null && request.getStream();
 
         if (isStreaming) {
-            return handleStreamingRequest(request);
+            return handleStreamingRequest(request, cacheContext);
         } else {
-            return handleRegularRequest(request);
+            return handleRegularRequest(request, cacheContext);
         }
     }
 
     /**
      * Handle regular (non-streaming) request.
      */
-    private Mono<ResponseEntity<ChatCompletionResponse>> handleRegularRequest(ChatCompletionRequest request) {
-        return proxyService.processRequest(request)
+    private Mono<ResponseEntity<ChatCompletionResponse>> handleRegularRequest(
+            ChatCompletionRequest request,
+            CacheControlContext cacheContext) {
+        return proxyService.processRequest(request, cacheContext)
                 .map(proxyResponse -> {
                     // Build response with provenance headers
                     HttpHeaders headers = new HttpHeaders();
@@ -81,6 +96,17 @@ public class ChatController {
                         if (proxyResponse.getSourceModel() != null) {
                             headers.add("x-cache-source-model", proxyResponse.getSourceModel());
                         }
+
+                        if (proxyResponse.getCacheAgeSeconds() != null) {
+                            headers.add("x-cache-age", String.valueOf(proxyResponse.getCacheAgeSeconds()));
+                        }
+
+                        if (proxyResponse.isDegraded()) {
+                            headers.add("x-cache-degraded", "true");
+                            if (proxyResponse.getDegradedReason() != null) {
+                                headers.add("x-cache-degraded-reason", proxyResponse.getDegradedReason());
+                            }
+                        }
                     }
 
                     return ResponseEntity.ok()
@@ -92,8 +118,10 @@ public class ChatController {
     /**
      * Handle streaming request with SSE.
      */
-    private Mono<ResponseEntity<Flux<String>>> handleStreamingRequest(ChatCompletionRequest request) {
-        return proxyService.processRequest(request)
+    private Mono<ResponseEntity<Flux<String>>> handleStreamingRequest(
+            ChatCompletionRequest request,
+            CacheControlContext cacheContext) {
+        return proxyService.processRequest(request, cacheContext)
                 .map(proxyResponse -> {
                     // Build provenance headers
                     HttpHeaders headers = new HttpHeaders();
@@ -112,6 +140,17 @@ public class ChatController {
 
                         if (proxyResponse.getSourceModel() != null) {
                             headers.add("x-cache-source-model", proxyResponse.getSourceModel());
+                        }
+
+                        if (proxyResponse.getCacheAgeSeconds() != null) {
+                            headers.add("x-cache-age", String.valueOf(proxyResponse.getCacheAgeSeconds()));
+                        }
+
+                        if (proxyResponse.isDegraded()) {
+                            headers.add("x-cache-degraded", "true");
+                            if (proxyResponse.getDegradedReason() != null) {
+                                headers.add("x-cache-degraded-reason", proxyResponse.getDegradedReason());
+                            }
                         }
                     }
 

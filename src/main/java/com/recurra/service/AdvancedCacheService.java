@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.recurra.config.RecurraProperties;
 import com.recurra.entity.CacheEntryEntity;
 import com.recurra.model.CachedResponse;
+import com.recurra.model.CacheControlContext;
 import com.recurra.model.ChatCompletionRequest;
 import com.recurra.model.ChatCompletionResponse;
 import com.recurra.repository.CacheEntryRepository;
@@ -84,33 +85,57 @@ public class AdvancedCacheService {
      * @return cached response if found
      */
     public Optional<CacheResult> get(ChatCompletionRequest request) {
+        return get(request, CacheControlContext.defaults());
+    }
+
+    /**
+     * Get cached response with cache control context.
+     *
+     * @param request incoming request
+     * @param context cache control preferences from headers
+     * @return cached response if found
+     */
+    public Optional<CacheResult> get(ChatCompletionRequest request, CacheControlContext context) {
         if (!properties.getCache().isEnabled()) {
+            return Optional.empty();
+        }
+
+        // Check bypass flag
+        if (context.isBypass()) {
+            log.debug("Cache bypass requested, skipping lookup");
             return Optional.empty();
         }
 
         long startTime = System.nanoTime();
 
         try {
-            // 1. Try exact match from Redis
-            String exactKey = canonicalizer.generateHash(request);
-            if (exactKey != null) {
-                Optional<CachedResponse> exactMatch = redisCache.get(DEFAULT_TENANT, exactKey);
-                if (exactMatch.isPresent()) {
-                    long latencyMs = (System.nanoTime() - startTime) / 1_000_000;
-                    log.info("Cache HIT (exact) in {}ms, key={}", latencyMs, exactKey);
+            // 1. Try exact match from Redis (if allowed by context)
+            if (context.useExactCache()) {
+                String exactKey = canonicalizer.generateHash(request);
+                if (exactKey != null) {
+                    Optional<CachedResponse> exactMatch = redisCache.get(DEFAULT_TENANT, exactKey);
+                    if (exactMatch.isPresent()) {
+                        long latencyMs = (System.nanoTime() - startTime) / 1_000_000;
+                        log.info("Cache HIT (exact) in {}ms, key={}", latencyMs, exactKey);
 
-                    return Optional.of(CacheResult.builder()
-                            .response(exactMatch.get().getResponse())
-                            .matchType(MatchType.EXACT)
-                            .score(1.0)
-                            .latencyMs(latencyMs)
-                            .source("redis")
-                            .build());
+                        CachedResponse cached = exactMatch.get();
+                        return Optional.of(CacheResult.builder()
+                                .response(cached.getResponse())
+                                .matchType(MatchType.EXACT)
+                                .score(1.0)
+                                .latencyMs(latencyMs)
+                                .source("redis")
+                                .createdAt(cached.getMetadata() != null ? cached.getMetadata().getCreatedAt() : null)
+                                .build());
+                    }
                 }
+            } else {
+                log.debug("Exact cache disabled by cache control context");
             }
 
-            // 2. Try template match from Postgres (if enabled)
-            if (properties.getCache().isTemplateMatching()) {
+            // 2. Try template match from Postgres (if enabled and allowed by context)
+            if (properties.getCache().isTemplateMatching() && context.useTemplateCache()) {
+                String exactKey = canonicalizer.generateHash(request);
                 Optional<CacheResult> templateMatch = findTemplateMatch(request, exactKey);
                 if (templateMatch.isPresent()) {
                     long latencyMs = (System.nanoTime() - startTime) / 1_000_000;
@@ -120,6 +145,8 @@ public class AdvancedCacheService {
                     return templateMatch.map(result ->
                             result.toBuilder().latencyMs(latencyMs).build());
                 }
+            } else if (!context.useTemplateCache()) {
+                log.debug("Template cache disabled by cache control context");
             }
 
             long latencyMs = (System.nanoTime() - startTime) / 1_000_000;
@@ -140,7 +167,24 @@ public class AdvancedCacheService {
      */
     @Transactional
     public void put(ChatCompletionRequest request, ChatCompletionResponse response) {
+        put(request, response, CacheControlContext.defaults());
+    }
+
+    /**
+     * Store response in cache with cache control context.
+     *
+     * @param request original request
+     * @param response provider response
+     * @param context cache control preferences
+     */
+    public void put(ChatCompletionRequest request, ChatCompletionResponse response, CacheControlContext context) {
         if (!properties.getCache().isEnabled()) {
+            return;
+        }
+
+        // Check store flag
+        if (!context.isStore()) {
+            log.debug("Cache storage disabled by cache control context");
             return;
         }
 
@@ -265,6 +309,7 @@ public class AdvancedCacheService {
                     .source("postgres")
                     .provenanceId(entity.getId().toString())
                     .sourceModel(entity.getModel())
+                    .createdAt(entity.getCreatedAt())
                     .build());
 
         } catch (Exception e) {
@@ -466,6 +511,7 @@ public class AdvancedCacheService {
         private String source;  // "redis" or "postgres"
         private String provenanceId;
         private String sourceModel;
+        private Instant createdAt;  // When the entry was created
     }
 
     /**
